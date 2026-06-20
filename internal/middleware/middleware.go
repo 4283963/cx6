@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -142,30 +143,39 @@ func APISignAuth(secret string) gin.HandlerFunc {
 	}
 }
 
+type ipRateBucket struct {
+	count     atomic.Int64
+	resetTime time.Time
+}
+
 func RateLimitByIP(limitPerMinute int) gin.HandlerFunc {
-	var mu sync.Mutex
-	bucket := make(map[string]*rateBucket)
+	var mu sync.RWMutex
+	buckets := make(map[string]*ipRateBucket)
+
 	return func(c *gin.Context) {
 		ip := c.ClientIP()
 		now := time.Now()
 
-		mu.Lock()
-		b, ok := bucket[ip]
+		mu.RLock()
+		b, ok := buckets[ip]
+		mu.RUnlock()
+
 		if !ok || now.After(b.resetTime) {
-			bucket[ip] = &rateBucket{
-				count:     1,
-				resetTime: now.Add(time.Minute),
+			mu.Lock()
+			b, ok = buckets[ip]
+			if !ok || now.After(b.resetTime) {
+				newB := &ipRateBucket{resetTime: now.Add(time.Minute)}
+				newB.count.Store(1)
+				buckets[ip] = newB
+				mu.Unlock()
+				c.Next()
+				return
 			}
 			mu.Unlock()
-			c.Next()
-			return
 		}
 
-		b.count++
-		current := b.count
-		mu.Unlock()
-
-		if current > limitPerMinute {
+		current := b.count.Add(1)
+		if current > int64(limitPerMinute) {
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"code": 42901,
 				"msg":  "too many requests",
@@ -206,11 +216,6 @@ func abs(x int64) int64 {
 		return -x
 	}
 	return x
-}
-
-type rateBucket struct {
-	count     int
-	resetTime time.Time
 }
 
 func parseTime(s string, out *int64) error {
