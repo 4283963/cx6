@@ -70,6 +70,34 @@ func SetNX(ctx context.Context, key string, value interface{}, expiration time.D
 	return Client.SetNX(ctx, key, value, expiration).Result()
 }
 
+func SetEX(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
+	return Client.SetEX(ctx, key, value, expiration).Err()
+}
+
+func Exists(ctx context.Context, keys ...string) (int64, error) {
+	return Client.Exists(ctx, keys...).Result()
+}
+
+func ZAdd(ctx context.Context, key string, members ...*redis.Z) (int64, error) {
+	return Client.ZAdd(ctx, key, members...).Result()
+}
+
+func ZRangeByScore(ctx context.Context, key string, opt *redis.ZRangeBy) ([]string, error) {
+	return Client.ZRangeByScore(ctx, key, opt).Result()
+}
+
+func ZRemRangeByScore(ctx context.Context, key, min, max string) (int64, error) {
+	return Client.ZRemRangeByScore(ctx, key, min, max).Result()
+}
+
+func ZCount(ctx context.Context, key, min, max string) (int64, error) {
+	return Client.ZCount(ctx, key, min, max).Result()
+}
+
+func Del(ctx context.Context, keys ...string) (int64, error) {
+	return Client.Del(ctx, keys...).Result()
+}
+
 func Close() error {
 	if Client != nil {
 		return Client.Close()

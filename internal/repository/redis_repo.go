@@ -112,3 +112,66 @@ func (r *RankRedisRepo) CheckAndMarkGameProcessed(ctx context.Context, gameID, p
 	}
 	return !ok, nil
 }
+
+const (
+	riskBlacklistKey     = "rank:risk:blacklist"
+	riskMaxScoreTTL     = 86400
+	riskClusterWindowMs = 5000
+	riskClusterThreshold = 5
+	riskBlacklistTTL = 86400 * 7
+)
+
+type RiskRecord struct {
+	TimestampMs int64
+	Score        int64
+	Mode         int8
+	RoomID       string
+}
+
+func (r *RankRedisRepo) IsBlacklisted(ctx context.Context, playerID string) (bool, error) {
+	score, err := redispkg.ZScore(ctx, riskBlacklistKey, playerID)
+	if err != nil {
+		if err == goredis.Nil {
+			return false, nil
+		}
+		return false, fmt.Errorf("redis zscore blacklist failed: %w", err)
+	}
+	return score > 0, nil
+}
+
+func (r *RankRedisRepo) AddToBlacklist(ctx context.Context, playerID string, reason string) error {
+	now := float64(time.Now().Unix())
+	_, err := redispkg.ZAdd(ctx, riskBlacklistKey, &goredis.Z{
+		Score:  now,
+		Member: playerID,
+	})
+	if err != nil {
+		return fmt.Errorf("redis zadd blacklist failed: %w", err)
+	}
+	detailKey := fmt.Sprintf("rank:risk:blacklist:detail:%s", playerID)
+	return redispkg.SetEX(ctx, detailKey, reason, time.Duration(riskBlacklistTTL)*time.Second)
+}
+
+func (r *RankRedisRepo) RecordMaxScoreAttempt(ctx context.Context, playerID string, score int64, mode int8, roomID string, timestampMs int64) (int64, error) {
+	key := fmt.Sprintf("rank:risk:maxscore:%s", playerID)
+	member := fmt.Sprintf("%d:%d:%d:%s", timestampMs, score, mode, roomID)
+	_, err := redispkg.ZAdd(ctx, key, &goredis.Z{
+		Score:  float64(timestampMs),
+		Member: member,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("redis zadd maxscore failed: %w", err)
+	}
+
+	windowStart := timestampMs - riskClusterWindowMs
+	min := fmt.Sprintf("%d", windowStart)
+	max := fmt.Sprintf("%d", timestampMs)
+
+	count, err := redispkg.ZCount(ctx, key, min, max)
+	if err != nil {
+		return 0, fmt.Errorf("redis zcount maxscore failed: %w", err)
+	}
+
+	_, _ = redispkg.Expire(ctx, key, time.Duration(riskMaxScoreTTL)*time.Second)
+	return count, nil
+}

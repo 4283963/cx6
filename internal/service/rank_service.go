@@ -15,11 +15,13 @@ import (
 )
 
 var (
-	ErrScoreOutOfRange    = errors.New("score delta out of allowed range")
+	ErrScoreOutOfRange     = errors.New("score delta out of allowed range")
 	ErrGameAlreadyProcessed = errors.New("game already processed")
-	ErrRateLimitExceeded  = errors.New("upload rate limit exceeded")
-	ErrInvalidSignature   = errors.New("invalid request signature")
-	ErrTimestampExpired   = errors.New("request timestamp expired")
+	ErrRateLimitExceeded   = errors.New("upload rate limit exceeded")
+	ErrInvalidSignature    = errors.New("invalid request signature")
+	ErrTimestampExpired    = errors.New("request timestamp expired")
+	ErrPlayerBlacklisted   = errors.New("player is blacklisted for cheating")
+	ErrClusterCheatDetected = errors.New("cluster cheat detected: burst identical max-score uploads")
 )
 
 const (
@@ -46,6 +48,23 @@ func NewRankService(redisRepo *repository.RankRedisRepo, mysqlRepo *repository.R
 func (s *RankService) UploadScore(ctx context.Context, req *model.ScoreUploadRequest) (*model.ScoreUploadResponse, error) {
 	if err := s.validateRequest(ctx, req); err != nil {
 		return nil, err
+	}
+
+	blacklisted, err := s.redisRepo.IsBlacklisted(ctx, req.PlayerID)
+	if err != nil {
+		log.Printf("[WARN] check blacklist failed: player=%s, err=%v", req.PlayerID, err)
+	} else if blacklisted {
+		s.logSuspectBehavior(ctx, req, "player already blacklisted")
+		return nil, ErrPlayerBlacklisted
+	}
+
+	if req.Score >= s.cfg.AntiCheat.MaxScorePerGame {
+		if cheat, reason := s.detectClusterCheat(ctx, req); cheat {
+			_ = s.redisRepo.AddToBlacklist(ctx, req.PlayerID, reason)
+			s.logSuspectBehavior(ctx, req, reason)
+			log.Printf("[RISK] player blacklisted due to cluster cheat: player=%s, reason=%s", req.PlayerID, reason)
+			return nil, ErrClusterCheatDetected
+		}
 	}
 
 	processed, err := s.redisRepo.CheckAndMarkGameProcessed(ctx, req.GameID, req.PlayerID, ProcessedGameTTL)
@@ -81,6 +100,24 @@ func (s *RankService) UploadScore(ctx context.Context, req *model.ScoreUploadReq
 		NewRank:    newRank,
 		DeltaScore: req.Score,
 	}, nil
+}
+
+func (s *RankService) detectClusterCheat(ctx context.Context, req *model.ScoreUploadRequest) (bool, string) {
+	nowMs := time.Now().UnixNano() / int64(time.Millisecond)
+	if req.Timestamp > 0 {
+		nowMs = req.Timestamp * 1000
+	}
+
+	count, err := s.redisRepo.RecordMaxScoreAttempt(ctx, req.PlayerID, req.Score, req.Mode, req.RoomID, nowMs)
+	if err != nil {
+		log.Printf("[WARN] record max score attempt failed: player=%s, err=%v", req.PlayerID, err)
+		return false, ""
+	}
+
+	if count >= 5 {
+		return true, fmt.Sprintf("cluster cheat: %d identical max-score(%d) uploads within 5000ms window", count, req.Score)
+	}
+	return false, ""
 }
 
 func (s *RankService) validateRequest(ctx context.Context, req *model.ScoreUploadRequest) error {

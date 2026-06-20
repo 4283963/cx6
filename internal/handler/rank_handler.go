@@ -69,6 +69,10 @@ func (h *RankHandler) handleUploadError(c *gin.Context, err error) {
 		fail(c, http.StatusUnauthorized, 40110, err.Error())
 	case errors.Is(err, service.ErrTimestampExpired):
 		fail(c, http.StatusUnauthorized, 40111, err.Error())
+	case errors.Is(err, service.ErrPlayerBlacklisted):
+		fail(c, http.StatusForbidden, 40301, err.Error())
+	case errors.Is(err, service.ErrClusterCheatDetected):
+		fail(c, http.StatusForbidden, 40302, err.Error())
 	default:
 		fail(c, http.StatusInternalServerError, 50001, "upload score failed: "+err.Error())
 	}
